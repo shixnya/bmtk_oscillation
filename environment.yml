@@ -1,0 +1,8 @@
+name: bmtk_nest
+channels:
+  - conda-forge
+  - defaults
+  - kaeldai
+dependencies:
+  - bmtk
+  - nest-simulator
