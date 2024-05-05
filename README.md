@@ -1,4 +1,4 @@
-# BMTK simulation environment for Oscillation Study
+# BMTK simulation environment for oscillation study
 
 To make an environment to work on, please use the environment.yml.
 
