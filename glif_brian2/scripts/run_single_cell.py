@@ -1,6 +1,6 @@
 import os
 import sys
-import matplotlib.pyplot as plt
+import argparse  # Import argparse for command-line arguments
 from brian2 import (
     NeuronGroup,
     StateMonitor,
@@ -17,187 +17,165 @@ from brian2 import (
     pF,
     siemens,
     farad,
-)  # Import necessary units and base types
+)
 
+# --- Setup Project Path --- #
+# This block assumes utils.py is in ../src relative to this script
+script_dir = os.path.dirname(os.path.abspath(__file__))
+src_dir_relative = os.path.join(script_dir, "..", "src")
+sys.path.insert(0, os.path.abspath(src_dir_relative))
 
-# --- Determine project root and add src to sys.path ---
-def get_project_root():
-    """Traverse up to find the project root marked by a known file/dir."""
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    while current_dir != "/":  # Avoid infinite loop at filesystem root
-        # Heuristic: Check for a known top-level file or directory
-        if os.path.exists(os.path.join(current_dir, "README.md")) or os.path.exists(
-            os.path.join(current_dir, ".git")
-        ):
-            return current_dir
-        parent_dir = os.path.dirname(current_dir)
-        if parent_dir == current_dir:  # Reached root
-            break
-        current_dir = parent_dir
-    # Fallback if marker not found (adjust as needed)
-    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
-
-PROJECT_ROOT = get_project_root()
-SRC_DIR = os.path.join(PROJECT_ROOT, "glif_brian2", "src")
-if SRC_DIR not in sys.path:
-    sys.path.append(SRC_DIR)
-
-# Now import local modules
 try:
+    from utils import get_project_root, add_src_to_path, plot_simulation_results
     from parameters import load_glif_params
     from neuron_models import get_glif_asc_equations
 except ImportError as e:
-    print(f"Error importing modules from {SRC_DIR}: {e}")
-    print(f"Current sys.path: {sys.path}")
+    print(
+        f"Error importing modules. Ensure 'utils.py', 'parameters.py', and 'neuron_models.py' are in the src directory ({src_dir_relative}). Error: {e}"
+    )
     sys.exit(1)
 
-# --- Simulation Configuration ---
-# Use relative path from script location to cell_models
-# These three cell models are typical mouse V1 L2/3 pyramidal cells
-CELL_MODEL_FILENAME = "489751692_glif_lif_asc_config.json"
-# CELL_MODEL_FILENAME = "490376252_glif_lif_asc_config.json"
-# CELL_MODEL_FILENAME = "505512874_glif_lif_asc_config.json"
-CELL_MODEL_PATH = os.path.join(
-    PROJECT_ROOT, "glif_brian2", "cell_models", CELL_MODEL_FILENAME
+# --- Simulation Configuration --- #
+# Default values
+DEFAULT_CELL_MODEL_FILENAME = (
+    "489751692_glif_lif_asc_config.json"  # One of the typical ones
 )
+SIM_CONFIG = {
+    "SIMULATION_DURATION": 500 * ms,
+    "INJECTED_CURRENT_AMP": 250 * pA,
+    "CURRENT_START_TIME": 100 * ms,
+    "CURRENT_END_TIME": 400 * ms,
+    "DT": 0.1 * ms,
+}
 
-SIMULATION_DURATION = 500 * ms
-INJECTED_CURRENT_AMP = 250 * pA  # Example current injection amplitude
-CURRENT_START_TIME = 100 * ms
-CURRENT_END_TIME = 400 * ms
-DT = 0.1 * ms  # Simulation time step
 
-# --- Load Parameters ---
-try:
-    params = load_glif_params(CELL_MODEL_PATH)
-except FileNotFoundError:
-    print(f"Error: Cell model file not found at {CELL_MODEL_PATH}")
-    sys.exit(1)
-except Exception as e:
-    print(f"Error loading parameters: {e}")
-    sys.exit(1)
+def run_simulation(cell_model_filename, config):
+    """Runs a single GLIF cell simulation with the given configuration."""
 
-# --- Setup Brian2 Model ---
-defaultclock.dt = DT
+    PROJECT_ROOT = get_project_root()  # Find project root using utils
+    CELL_MODEL_PATH = os.path.join(
+        PROJECT_ROOT, "glif_brian2", "cell_models", cell_model_filename
+    )
 
-# Get equations based on the number of ASC components
-eqs, reset_eqs = get_glif_asc_equations(params["num_asc"])
+    # --- Load Parameters --- #
+    try:
+        params = load_glif_params(CELL_MODEL_PATH)
+    except FileNotFoundError:
+        print(f"Error: Cell model file not found at {CELL_MODEL_PATH}")
+        sys.exit(1)
+    except Exception as e:
+        print(f"Error loading parameters from {cell_model_filename}: {e}")
+        sys.exit(1)
 
-# Create NeuronGroup
-# Ensure all parameters used in equations are defined either here or as variables
-neuron = NeuronGroup(
-    1,
-    model=eqs,
-    threshold="V>V_th",
-    reset=reset_eqs,
-    refractory="t_ref",
-    method="exact",
-)  # Using Euler for simplicity
+    # --- Setup Brian2 Model --- #
+    defaultclock.dt = config["DT"]
+    eqs, reset_eqs = get_glif_asc_equations(params["num_asc"])
 
-# --- Set Initial Conditions and Parameters ---
-neuron.V = params["V_init"]  # Use V_init from params
-neuron.I_inj = 0 * pA  # Initialize injected current
+    neuron = NeuronGroup(
+        1,
+        model=eqs,
+        threshold="V>V_th",
+        reset=reset_eqs,
+        refractory="t_ref",
+        method="euler",
+    )
 
-# Assign parameters from the loaded dictionary to the NeuronGroup
-neuron.g = params["g"]
-neuron.E_L = params["E_L"]
-neuron.C_m = params["C_m"]
-neuron.V_th = params["V_th"]
-neuron.V_reset = params["V_reset"]
-neuron.t_ref = params["t_ref"]
+    # --- Set Initial Conditions and Parameters --- #
+    neuron.V = params["V_init"]
+    neuron.I_inj = 0 * pA
+    neuron.g = params["g"]
+    neuron.E_L = params["E_L"]
+    neuron.C_m = params["C_m"]
+    neuron.V_th = params["V_th"]
+    neuron.V_reset = params["V_reset"]
+    neuron.t_ref = params["t_ref"]
 
-# Assign ASC parameters if present
-if params["asc_present"]:
-    for i in range(params["num_asc"]):
-        # Initialize state variables for ASC currents
-        setattr(neuron, f"I_asc{i}", params["asc_init"][i])
-        # Assign parameters for ASC dynamics
-        setattr(neuron, f"asc_decay{i}", params["asc_decay"][i])
-        setattr(neuron, f"asc_amp{i}", params["asc_amps"][i])
-else:
-    # Ensure I_asc_total is initialized if no ASCs (though model eq should handle this)
-    if "I_asc_total" in neuron.variables:
+    if params["asc_present"]:
+        for i in range(params["num_asc"]):
+            setattr(neuron, f"I_asc{i}", params["asc_init"][i])
+            setattr(neuron, f"asc_decay{i}", params["asc_decay"][i])
+            setattr(neuron, f"asc_amp{i}", params["asc_amps"][i])
+    elif "I_asc_total" in neuron.variables:
         neuron.I_asc_total = 0 * pA
 
-# --- Setup Monitors ---
-# Determine variables to monitor
-vars_to_monitor = ["V"]
-if params["asc_present"]:
-    vars_to_monitor.append("I_asc_total")
-    vars_to_monitor.extend([f"I_asc{i}" for i in range(params["num_asc"])])
+    # --- Setup Monitors --- #
+    vars_to_monitor = ["V"]
+    if params["asc_present"]:
+        vars_to_monitor.append("I_asc_total")
+        vars_to_monitor.extend([f"I_asc{i}" for i in range(params["num_asc"])])
 
-state_monitor = StateMonitor(
-    neuron, vars_to_monitor, record=0
-)  # Record from the first (only) neuron
-spike_monitor = SpikeMonitor(neuron)
+    state_monitor = StateMonitor(neuron, vars_to_monitor, record=0)
+    spike_monitor = SpikeMonitor(neuron)
 
-# --- Run Simulation ---
-print(f"Running simulation for {SIMULATION_DURATION}...")
-# Initial run with no current
-run(CURRENT_START_TIME)
-# Apply current injection
-neuron.I_inj = INJECTED_CURRENT_AMP
-run(CURRENT_END_TIME - CURRENT_START_TIME)
-# Run after current stops
-neuron.I_inj = 0 * pA
-run(SIMULATION_DURATION - CURRENT_END_TIME)
-print("Simulation finished.")
-
-# --- Plot Results ---
-plt.style.use("seaborn-v0_8-darkgrid")  # Use a nice style
-num_plots = 2 + (1 if params["asc_present"] else 0)
-fig, axes = plt.subplots(num_plots, 1, figsize=(12, 4 * num_plots), sharex=True)
-ax_idx = 0
-
-# Plot Voltage
-ax = axes[ax_idx]
-ax.plot(state_monitor.t / ms, state_monitor.V[0] / mV, label="Vm", color="royalblue")
-ax.set_ylabel("Voltage (mV)")
-ax.set_title(f"Single GLIF Neuron Simulation ({CELL_MODEL_FILENAME})")
-ax.grid(True)
-ax_idx += 1
-
-# Plot ASC components if present
-if params["asc_present"]:
-    ax = axes[ax_idx]
-    for i in range(params["num_asc"]):
-        ax.plot(
-            state_monitor.t / ms,
-            getattr(state_monitor, f"I_asc{i}")[0] / pA,
-            label=f"I_asc{i}",
-        )
-    ax.plot(
-        state_monitor.t / ms,
-        state_monitor.I_asc_total[0] / pA,
-        label="I_asc_total",
-        linestyle="--",
-        color="black",
+    # --- Run Simulation --- #
+    print(
+        f"Running simulation for {config['SIMULATION_DURATION']} using {cell_model_filename}..."
     )
-    ax.set_ylabel("ASC (pA)")
-    ax.legend()
-    ax.grid(True)
-    ax_idx += 1
+    run(config["CURRENT_START_TIME"])
+    neuron.I_inj = config["INJECTED_CURRENT_AMP"]
+    run(config["CURRENT_END_TIME"] - config["CURRENT_START_TIME"])
+    neuron.I_inj = 0 * pA
+    run(config["SIMULATION_DURATION"] - config["CURRENT_END_TIME"])
+    print("Simulation finished.")
 
-# Plot Injected Current
-ax = axes[ax_idx]
-injected_current_trace = [
-    (INJECTED_CURRENT_AMP if CURRENT_START_TIME <= t < CURRENT_END_TIME else 0 * pA)
-    for t in state_monitor.t
-]
-ax.plot(
-    state_monitor.t / ms,
-    [c / pA for c in injected_current_trace],
-    label="Injected Current",
-    color="firebrick",
-)
-ax.set_xlabel("Time (ms)")
-ax.set_ylabel("Current (pA)")
-ax.legend()
-ax.grid(True)
+    # --- Plot Results --- #
+    plot_simulation_results(
+        state_monitor, spike_monitor, params, config, cell_model_filename
+    )
 
-plt.tight_layout()
-plt.show()
 
-print(f"Number of spikes: {spike_monitor.num_spikes}")
-print(f"Spike times (ms): {spike_monitor.t / ms}")
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Run a single GLIF cell simulation using Brian2."
+    )
+    parser.add_argument(
+        "-m",
+        "--model",
+        type=str,
+        default=DEFAULT_CELL_MODEL_FILENAME,
+        help=f"Filename of the cell model JSON in cell_models directory (default: {DEFAULT_CELL_MODEL_FILENAME})",
+    )
+    parser.add_argument(
+        "-i",
+        "--current",
+        type=float,
+        default=SIM_CONFIG["INJECTED_CURRENT_AMP"] / pA,
+        help=f"Injected current amplitude in pA (default: {SIM_CONFIG['INJECTED_CURRENT_AMP']/pA})",
+    )
+    parser.add_argument(
+        "--t_start",
+        type=float,
+        default=SIM_CONFIG["CURRENT_START_TIME"] / ms,
+        help=f"Start time of current injection in ms (default: {SIM_CONFIG['CURRENT_START_TIME']/ms})",
+    )
+    parser.add_argument(
+        "--t_end",
+        type=float,
+        default=SIM_CONFIG["CURRENT_END_TIME"] / ms,
+        help=f"End time of current injection in ms (default: {SIM_CONFIG['CURRENT_END_TIME']/ms})",
+    )
+    parser.add_argument(
+        "--duration",
+        type=float,
+        default=SIM_CONFIG["SIMULATION_DURATION"] / ms,
+        help=f"Total simulation duration in ms (default: {SIM_CONFIG['SIMULATION_DURATION']/ms})",
+    )
+    parser.add_argument(
+        "--dt",
+        type=float,
+        default=SIM_CONFIG["DT"] / ms,
+        help=f"Simulation time step in ms (default: {SIM_CONFIG['DT']/ms})",
+    )
+
+    args = parser.parse_args()
+
+    # Update config from command-line arguments
+    current_config = {
+        "SIMULATION_DURATION": args.duration * ms,
+        "INJECTED_CURRENT_AMP": args.current * pA,
+        "CURRENT_START_TIME": args.t_start * ms,
+        "CURRENT_END_TIME": args.t_end * ms,
+        "DT": args.dt * ms,
+    }
+
+    run_simulation(args.model, current_config)
